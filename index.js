@@ -116,66 +116,125 @@ export function pathToBase64(path) {
 
 export function base64ToPath(base64) {
     return new Promise(function(resolve, reject) {
+        if (!base64 || typeof base64 !== 'string') {
+            reject(new Error('Invalid base64 data'))
+            return
+        }
+
         if (typeof window === 'object' && 'document' in window) {
-            base64 = base64.split(',')
-            var type = base64[0].match(/:(.*?);/)[1]
-            var str = atob(base64[1])
-            var n = str.length
-            var array = new Uint8Array(n)
-            while (n--) {
-                array[n] = str.charCodeAt(n)
+            try {
+                base64 = base64.split(',')
+                var type = base64[0].match(/:(.*?);/)[1]
+                var str = atob(base64[1])
+                var n = str.length
+                var array = new Uint8Array(n)
+                while (n--) {
+                    array[n] = str.charCodeAt(n)
+                }
+                return resolve((window.URL || window.webkitURL).createObjectURL(new Blob([array], { type: type })))
+            } catch (error) {
+                reject(new Error('Failed to process base64 data: ' + error.message))
             }
-            return resolve((window.URL || window.webkitURL).createObjectURL(new Blob([array], { type: type })))
+            return
         }
+
         var extName = base64.split(',')[0].match(/data\:\S+\/(\S+);/)
-        if (extName) {
-            extName = extName[1]
-        } else {
-            reject(new Error('base64 error'))
+        if (!extName) {
+            reject(new Error('Invalid base64 data'))
+            return
         }
+        extName = extName[1]
         var fileName = getNewFileId() + '.' + extName
+
         if (typeof plus === 'object') {
             var basePath = '_doc'
-            var dirPath = 'uniapp_temp'
-            var filePath = basePath + '/' + dirPath + '/' + fileName
+            var filePath = basePath + '/' + fileName
+            
+            function handleError(error, bitmap) {
+                console.error('File operation failed:', error)
+                if (bitmap) {
+                    bitmap.clear()
+                }
+                reject(new Error(error.message || 'File operation failed'))
+            }
+
             if (!biggerThan(plus.os.name === 'Android' ? '1.9.9.80627' : '1.9.9.80472', plus.runtime.innerVersion)) {
                 plus.io.resolveLocalFileSystemURL(basePath, function(entry) {
-                    entry.getDirectory(dirPath, {
+                    entry.getFile(fileName, {
                         create: true,
                         exclusive: false,
                     }, function(entry) {
-                        entry.getFile(fileName, {
-                            create: true,
-                            exclusive: false,
-                        }, function(entry) {
-                            entry.createWriter(function(writer) {
-                                writer.onwrite = function() {
-                                    resolve(filePath)
-                                }
-                                writer.onerror = reject
-                                writer.seek(0)
-                                writer.writeAsBinary(dataUrlToBase64(base64))
-                            }, reject)
-                        }, reject)
-                    }, reject)
-                }, reject)
+                        entry.createWriter(function(writer) {
+                            writer.onwrite = function() {
+                                plus.io.resolveLocalFileSystemURL(filePath, function(entry) {
+                                    entry.file(function(file) {
+                                        if (file.size > 0) {
+                                            try {
+                                                var realPath = plus.io.convertLocalFileSystemURL(filePath)
+                                                console.log('File saved successfully:', realPath)
+                                                resolve(realPath)
+                                            } catch (error) {
+                                                handleError(error)
+                                            }
+                                        } else {
+                                            handleError(new Error('File write failed: empty file'))
+                                        }
+                                    }, function(error) {
+                                        handleError(error)
+                                    })
+                                }, function(error) {
+                                    handleError(error)
+                                })
+                            }
+                            writer.onerror = function(error) {
+                                handleError(error)
+                            }
+                            writer.seek(0)
+                            writer.writeAsBinary(dataUrlToBase64(base64))
+                        }, function(error) {
+                            handleError(error)
+                        })
+                    }, function(error) {
+                        handleError(error)
+                    })
+                }, function(error) {
+                    handleError(error)
+                })
                 return
             }
+
             var bitmap = new plus.nativeObj.Bitmap(fileName)
             bitmap.loadBase64Data(base64, function() {
                 bitmap.save(filePath, {}, function() {
-                    bitmap.clear()
-                    resolve(filePath)
+                    plus.io.resolveLocalFileSystemURL(filePath, function(entry) {
+                        entry.file(function(file) {
+                            if (file.size > 0) {
+                                try {
+                                    bitmap.clear()
+                                    var realPath = plus.io.convertLocalFileSystemURL(filePath)
+                                    console.log('File saved successfully:', realPath)
+                                    resolve(realPath)
+                                } catch (error) {
+                                    handleError(error, bitmap)
+                                }
+                            } else {
+                                handleError(new Error('File write failed: empty file'), bitmap)
+                            }
+                        }, function(error) {
+                            handleError(error, bitmap)
+                        })
+                    }, function(error) {
+                        handleError(error, bitmap)
+                    })
                 }, function(error) {
-                    bitmap.clear()
-                    reject(error)
+                    handleError(error, bitmap)
                 })
             }, function(error) {
-                bitmap.clear()
-                reject(error)
+                handleError(error, bitmap)
             })
             return
         }
+
         if (typeof wx === 'object' && wx.canIUse('getFileSystemManager')) {
             var filePath = wx.env.USER_DATA_PATH + '/' + fileName
             wx.getFileSystemManager().writeFile({
@@ -183,14 +242,27 @@ export function base64ToPath(base64) {
                 data: dataUrlToBase64(base64),
                 encoding: 'base64',
                 success: function() {
-                    resolve(filePath)
+                    wx.getFileSystemManager().stat({
+                        path: filePath,
+                        success: function(res) {
+                            if (res.stats.size > 0) {
+                                console.log('File saved successfully:', filePath)
+                                resolve(filePath)
+                            } else {
+                                reject(new Error('File write failed: empty file'))
+                            }
+                        },
+                        fail: function(error) {
+                            reject(new Error('Failed to verify file: ' + error.errMsg))
+                        }
+                    })
                 },
                 fail: function(error) {
-                    reject(error)
+                    reject(new Error('Failed to write file: ' + error.errMsg))
                 }
             })
             return
         }
-        reject(new Error('not support'))
+        reject(new Error('Platform not supported'))
     })
 }
